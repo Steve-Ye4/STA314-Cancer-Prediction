@@ -1,0 +1,247 @@
+---
+title: "Cancer Type Classification with Multinomial Elastic Net"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE
+)
+
+```
+
+```{r}
+#1. Load packages
+library(glmnet)
+library(irlba)
+library(caret)
+```
+
+```{r}
+#2. Read data
+train <- read.csv("train.csv", check.names = FALSE)
+test <- read.csv("test.csv", check.names = FALSE)
+
+dim(train)
+dim(test)
+head(train[, 1:5])
+```
+
+```{r}
+#3. Prepare response and predictors
+y <- as.factor(train$cancer)
+
+x_train <- as.matrix(
+  train[, setdiff(names(train), c("id", "cancer")), drop = FALSE]
+)
+
+x_test <- as.matrix(
+  test[, setdiff(names(test), "id"), drop = FALSE]
+)
+
+common_cols <- intersect(colnames(x_train), colnames(x_test))
+x_train <- x_train[, common_cols, drop = FALSE]
+x_test <- x_test[, common_cols, drop = FALSE]
+
+col_var <- apply(x_train, 2, var)
+keep <- !is.na(col_var) & col_var > 0
+
+x_train <- x_train[, keep, drop = FALSE]
+x_test <- x_test[, keep, drop = FALSE]
+
+dim(x_train)
+dim(x_test)
+table(y)
+```
+
+```{r cache=TRUE}
+#4. Fit model or load saved model
+set.seed(314)
+
+if (file.exists("fit_cv.rds")) {
+  fit_cv <- readRDS("fit_cv.rds")
+} else {
+  fit_cv <- cv.glmnet(
+    x = x_train,
+    y = y,
+    family = "multinomial",
+    alpha = 0.5,
+    nfolds = 3,
+    nlambda = 50,
+    standardize = TRUE,
+    type.measure = "class"
+  )
+  
+  saveRDS(fit_cv, "fit_cv.rds")
+}
+```
+
+```{r}
+#5. Cross-validation plot
+library(glmnet)
+
+fit_cv <- readRDS("fit_cv.rds")
+plot(fit_cv)
+```
+
+```{r cache=TRUE}
+#6. PCA visualization
+x_pca <- train[, setdiff(names(train), c("id", "cancer")), drop = FALSE]
+
+var_rank <- apply(x_pca, 2, var, na.rm = TRUE)
+var_rank <- sort(var_rank, decreasing = TRUE)
+
+top_genes <- names(var_rank)[1:1000]
+x_top <- x_pca[, top_genes, drop = FALSE]
+x_top <- scale(x_top)
+
+pca_fast <- prcomp_irlba(x_top, n = 2)
+
+plot(
+  pca_fast$x[, 1],
+  pca_fast$x[, 2],
+  col = y,
+  pch = 16,
+  xlab = "PC1",
+  ylab = "PC2"
+)
+
+legend(
+  "topright",
+  legend = levels(y),
+  col = 1:length(levels(y)),
+  pch = 16
+)
+```
+
+```{r cache=TRUE}
+#7. Generate test predictions
+pred <- predict(
+  fit_cv,
+  newx = x_test,
+  s = "lambda.min",
+  type = "class"
+)
+
+submission <- data.frame(
+  id = test$id,
+  cancer = as.integer(pred)
+)
+
+head(submission)
+```
+
+```{r}
+#8. Save submission file
+# write.csv(submission, "submission_glmnet.csv", row.names = FALSE)
+```
+
+```{r}
+#9. Important genes
+coef_min <- coef(fit_cv, s = "lambda.min")
+
+top_features <- lapply(coef_min, function(m) {
+  df <- data.frame(
+    gene = rownames(m),
+    coef = as.numeric(m)
+  )
+  df <- df[df$gene != "(Intercept)", ]
+  df <- df[order(abs(df$coef), decreasing = TRUE), ]
+  head(df, 10)
+})
+
+top_features
+```
+
+```{r cache=TRUE}
+## 10. Validation performance
+set.seed(314)
+
+if (file.exists("perf_results.rds")) {
+  perf_results <- readRDS("perf_results.rds")
+} else {
+  perf_idx <- caret::createDataPartition(y, p = 0.8, list = FALSE)
+
+  x_tr_perf <- x_train[perf_idx, , drop = FALSE]
+  y_tr_perf <- y[perf_idx]
+
+  x_val_perf <- x_train[-perf_idx, , drop = FALSE]
+  y_val_perf <- y[-perf_idx]
+
+  fit_perf <- cv.glmnet(
+    x = x_tr_perf,
+    y = y_tr_perf,
+    family = "multinomial",
+    alpha = 0.5,
+    nfolds = 3,
+    nlambda = 50,
+    standardize = TRUE,
+    type.measure = "class"
+  )
+
+  pred_valid <- predict(
+    fit_perf,
+    newx = x_val_perf,
+    s = "lambda.min",
+    type = "class"
+  )
+
+  pred_valid <- as.vector(pred_valid)
+  y_valid <- as.vector(y_val_perf)
+
+  cm <- table(y_valid, pred_valid)
+  accuracy <- sum(diag(cm)) / sum(cm)
+
+  precision <- diag(cm) / colSums(cm)
+  recall <- diag(cm) / rowSums(cm)
+  f1 <- 2 * precision * recall / (precision + recall)
+
+  metrics <- data.frame(
+    Class = rownames(cm),
+    Precision = precision,
+    Recall = recall,
+    F1 = f1
+  )
+
+  macro_precision <- mean(precision, na.rm = TRUE)
+  macro_recall <- mean(recall, na.rm = TRUE)
+  macro_f1 <- mean(f1, na.rm = TRUE)
+
+  perf_results <- list(
+    cm = cm,
+    accuracy = accuracy,
+    metrics = metrics,
+    macro_precision = macro_precision,
+    macro_recall = macro_recall,
+    macro_f1 = macro_f1
+  )
+
+  saveRDS(perf_results, "perf_results.rds")
+}
+```
+
+```{r}
+#11. Confusion matrix
+perf_results$cm
+```
+
+```{r}
+#12. Accuracy
+perf_results$accuracy
+```
+
+```{r}
+#13. Precision, recall, and F1 by class
+perf_results$metrics
+```
+
+```{r}
+#14. Macro-averaged metrics
+perf_results$macro_precision
+perf_results$macro_recall
+perf_results$macro_f1
+```
+
