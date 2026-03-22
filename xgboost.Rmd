@@ -1,0 +1,198 @@
+---
+title: "xgboost"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-03-07"
+---
+
+```{r}
+# load training data and classification setup
+train <- read.csv("train.csv", check.names = FALSE)
+
+stopifnot("id" %in% names(train))
+stopifnot(!anyNA(train))
+stopifnot(!anyDuplicated(train$id))
+
+y <- factor(train$cancer)
+feature_names <- setdiff(names(train), c("id", "cancer"))
+X <- train[, feature_names, drop = FALSE]
+
+x_mat <- as.matrix(X)
+
+class_counts <- table(y)
+class_props <- prop.table(class_counts)
+```
+
+
+```{r}
+# stratified train validation split
+set.seed(314)
+
+p_train <- 0.8
+
+idx_train <- sort(unlist(lapply(levels(y), function(cls) {
+  idx <- which(y == cls)
+  sample(idx, floor(length(idx) * p_train))
+})))
+
+idx_valid <- setdiff(seq_along(y), idx_train)
+
+train_counts <- table(y[idx_train])
+valid_counts <- table(y[idx_valid])
+
+train_props <- prop.table(train_counts)
+valid_props <- prop.table(valid_counts)
+
+train_counts
+valid_counts
+round(train_props, 3)
+round(valid_props, 3)
+```
+
+```{r}
+# train: xgboost model evaluation and validation
+library(xgboost)
+
+X_train <- x_mat[idx_train, , drop = FALSE]
+y_train <- y[idx_train]
+
+X_valid <- x_mat[idx_valid, , drop = FALSE]
+y_valid <- y[idx_valid]
+
+label_train <- as.integer(y_train) - 1
+label_valid <- as.integer(y_valid) - 1
+
+freq <- table(y_train)
+w_class <- sum(freq) / (length(freq) * freq)
+w_train <- as.numeric(w_class[as.character(y_train)])
+
+dtrain <- xgb.DMatrix(data = X_train, label = label_train, weight = w_train)
+dvalid <- xgb.DMatrix(data = X_valid, label = label_valid)
+
+params <- list(
+  objective = "multi:softprob",
+  num_class = length(levels(y)),
+  eval_metric = "mlogloss",
+  max_depth = 4,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.5,
+  min_child_weight = 5,
+  lambda = 1
+)
+
+watchlist <- list(train = dtrain, valid = dvalid)
+
+model_xgb <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 2000,
+  watchlist = watchlist,
+  early_stopping_rounds = 50,
+  verbose = 1
+)
+
+prob_valid <- predict(model_xgb, dvalid, reshape = TRUE)
+
+pred_valid_num <- max.col(prob_valid)
+pred_valid <- factor(pred_valid_num, levels = 1:length(levels(y)), labels = levels(y))
+
+acc_valid <- mean(pred_valid == y_valid)
+cm_valid <- table(True = y_valid, Pred = pred_valid)
+
+acc_valid
+cm_valid
+model_xgb$best_iteration
+model_xgb$best_score
+```
+
+```{r}
+# xgboost model for test data
+test <- read.csv("test.csv", check.names = FALSE)
+
+stopifnot("id" %in% names(test))
+stopifnot(!anyNA(test))
+stopifnot(!anyDuplicated(test$id))
+
+feature_names <- colnames(x_mat)
+stopifnot(all(feature_names %in% names(test)))
+
+X_test <- as.matrix(test[, feature_names, drop = FALSE])
+
+y_all <- y
+label_all <- as.integer(y_all) - 1
+
+freq_all <- table(y_all)
+w_class <- sum(freq_all) / (length(freq_all) * freq_all)
+w_all <- as.numeric(w_class[as.character(y_all)])
+
+dall <- xgb.DMatrix(data = x_mat, label = label_all, weight = w_all)
+dtest <- xgb.DMatrix(data = X_test)
+# refit xgboost on training data
+best_nrounds <- model_xgb$best_iteration
+if (is.null(best_nrounds) || is.na(best_nrounds)) best_nrounds <- 300
+params <- list(
+  objective = "multi:softprob",
+  num_class = length(levels(y_all)),
+  eval_metric = "mlogloss",
+  max_depth = 4,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.5,
+  min_child_weight = 5,
+  lambda = 1
+)
+
+final_xgb <- xgb.train(
+  params = params,
+  data = dall,
+  nrounds = best_nrounds,
+  verbose = 1
+)
+# predic test set
+prob_test <- predict(final_xgb, dtest, reshape = TRUE)
+
+pred_test_num <- max.col(prob_test)
+pred_test <- factor(pred_test_num,
+                    levels = 1:length(levels(y_all)),
+                    labels = levels(y_all))
+# submission file
+submission <- data.frame(
+  id = test$id,
+  cancer = as.integer(as.character(pred_test))
+)
+
+write.csv(submission, "submission.csv", row.names = FALSE)
+
+head(submission)
+```
+
+```{r}
+# evaluation metrics
+cm_valid <- table(True = y_valid, Pred = pred_valid)
+
+acc_valid <- mean(pred_valid == y_valid)
+
+tp <- diag(cm_valid)
+
+precision_by_class <- tp / colSums(cm_valid)
+recall_by_class <- tp / rowSums(cm_valid)
+f1_by_class <- 2 * precision_by_class * recall_by_class / (precision_by_class + recall_by_class)
+
+precision_by_class[is.na(precision_by_class)] <- 0
+recall_by_class[is.na(recall_by_class)] <- 0
+f1_by_class[is.na(f1_by_class)] <- 0
+
+precision_valid <- mean(precision_by_class)
+recall_valid <- mean(recall_by_class)
+f1_valid <- mean(f1_by_class)
+
+evaluation_summary <- data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F1 Score"),
+  Value = round(c(acc_valid, precision_valid, recall_valid, f1_valid), 4)
+)
+
+evaluation_summary
+cm_valid
+```
