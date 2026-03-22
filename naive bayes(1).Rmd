@@ -1,0 +1,272 @@
+---
+title: "naive bayes"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test  <- read.csv("test.csv", stringsAsFactors = FALSE)
+```
+
+```{r}
+dim(train)
+dim(test)
+
+head(train[, 1:10])
+```
+```{r}
+# convert label
+train$cancer <- as.factor(train$cancer)
+
+# split X / y
+train_x <- train[, !(names(train) %in% c("id", "cancer"))]
+train_y <- train$cancer
+
+test_x  <- test[, !(names(test) %in% c("id"))]
+
+dim(train_x)
+dim(test_x)
+```
+
+```{r}
+# remove zero-variance features
+vars <- apply(train_x, 2, var)
+
+train_x <- train_x[, vars > 0]
+test_x  <- test_x[, vars > 0]
+
+dim(train_x)
+```
+```{r}
+top_k <- 500
+
+train_x <- train_x[, 1:top_k]
+test_x  <- test_x[, 1:top_k]
+
+dim(train_x)
+dim(test_x)
+```
+
+```{r}
+set.seed(1)
+
+idx <- sample(1:nrow(train_x), size = floor(0.8 * nrow(train_x)))
+
+X_train <- train_x[idx, ]
+y_train <- train_y[idx]
+
+X_valid <- train_x[-idx, ]
+y_valid <- train_y[-idx]
+
+dim(X_train)
+dim(X_valid)
+```
+
+```{r}
+fit_gnb <- function(X, y, eps = 1e-9) {
+  classes <- sort(unique(y))
+  classes_char <- as.character(classes)
+  
+  priors <- sapply(classes, function(cl) mean(y == cl))
+  names(priors) <- classes_char
+  
+  means <- lapply(classes, function(cl) {
+    colMeans(X[y == cl, , drop = FALSE])
+  })
+  names(means) <- classes_char
+  
+  vars <- lapply(classes, function(cl) {
+    apply(X[y == cl, , drop = FALSE], 2, var) + eps
+  })
+  names(vars) <- classes_char
+  
+  list(
+    classes = classes,
+    priors = priors,
+    means = means,
+    vars = vars
+  )
+}
+
+predict_gnb <- function(model, X) {
+  n <- nrow(X)
+  k <- length(model$classes)
+  
+  log_probs <- matrix(0, nrow = n, ncol = k)
+  colnames(log_probs) <- as.character(model$classes)
+  
+  for (j in seq_along(model$classes)) {
+    cl <- as.character(model$classes[j])
+    mu <- model$means[[cl]]
+    va <- model$vars[[cl]]
+    
+    term1 <- -0.5 * log(2 * pi * va)
+    log_prior <- log(model$priors[cl])
+    
+    log_probs[, j] <- log_prior + rowSums(
+      matrix(term1, nrow = n, ncol = length(term1), byrow = TRUE) -
+      (X - matrix(mu, nrow = n, ncol = length(mu), byrow = TRUE))^2 /
+      (2 * matrix(va, nrow = n, ncol = length(va), byrow = TRUE))
+    )
+  }
+  
+  preds <- colnames(log_probs)[max.col(log_probs, ties.method = "first")]
+  factor(preds, levels = as.character(model$classes))
+}
+```
+
+```{r}
+model_nb <- fit_gnb(X_train, y_train)
+pred_valid <- predict_gnb(model_nb, X_valid)
+
+table(pred_valid, y_valid)
+mean(pred_valid == y_valid)
+```
+```{r}
+# find indices of each class
+idx1 <- which(y_train == "1")
+idx2 <- which(y_train == "2")
+idx3 <- which(y_train == "3")
+
+# upsample class 2
+set.seed(1)
+idx2_up <- sample(idx2, length(idx1), replace = TRUE)
+
+# combine
+new_idx <- c(idx1, idx2_up, idx3)
+
+X_train_bal <- X_train[new_idx, ]
+y_train_bal <- y_train[new_idx]
+```
+
+```{r}
+model_nb <- fit_gnb(X_train_bal, y_train_bal)
+
+pred_valid <- predict_gnb(model_nb, X_valid)
+
+table(pred_valid, y_valid)
+mean(pred_valid == y_valid)
+```
+```{r}
+# compute variance of each feature
+vars <- apply(train_x, 2, var)
+
+# get top 500 most variable features
+top_idx <- order(vars, decreasing = TRUE)[1:500]
+
+train_x2 <- train_x[, top_idx]
+test_x2  <- test_x[, top_idx]
+```
+
+```{r}
+set.seed(1)
+
+idx <- sample(1:nrow(train_x2), 0.8 * nrow(train_x2))
+
+X_train <- train_x2[idx, ]
+y_train <- train_y[idx]
+
+X_valid <- train_x2[-idx, ]
+y_valid <- train_y[-idx]
+```
+
+```{r}
+idx1 <- which(y_train == "1")
+idx2 <- which(y_train == "2")
+idx3 <- which(y_train == "3")
+
+set.seed(1)
+idx2_up <- sample(idx2, length(idx1), replace = TRUE)
+
+new_idx <- c(idx1, idx2_up, idx3)
+
+X_train_bal <- X_train[new_idx, ]
+y_train_bal <- y_train[new_idx]
+```
+
+```{r}
+model_nb <- fit_gnb(X_train_bal, y_train_bal)
+
+pred_valid <- predict_gnb(model_nb, X_valid)
+
+table(pred_valid, y_valid)
+mean(pred_valid == y_valid)
+```
+```{r}
+# use the current 500-feature version of train_x and test_x
+# upsample class 2 on the FULL training set
+
+idx1 <- which(train_y == "1")
+idx2 <- which(train_y == "2")
+idx3 <- which(train_y == "3")
+
+set.seed(1)
+idx2_up <- sample(idx2, length(idx1), replace = TRUE)
+
+full_idx <- c(idx1, idx2_up, idx3)
+
+X_train_final <- train_x[full_idx, ]
+y_train_final <- train_y[full_idx]
+
+# fit final model
+model_nb_final <- fit_gnb(X_train_final, y_train_final)
+```
+
+```{r}
+pred_test <- predict_gnb(model_nb_final, test_x)
+table(pred_test)
+```
+```{r}
+submission <- data.frame(
+  id = test$id,
+  cancer = as.character(pred_test)
+)
+```
+
+```{r}
+head(submission)
+dim(submission)
+```
+```{r}
+# write.csv(submission, "submission_nb.csv", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+# confusion matrix (standard format: actual vs predicted)
+cm <- table(y_valid, pred_valid)
+cm
+
+# accuracy
+accuracy <- sum(diag(cm)) / sum(cm)
+accuracy
+
+# precision, recall, F1 (per class)
+precision <- diag(cm) / colSums(cm)
+recall    <- diag(cm) / rowSums(cm)
+f1        <- 2 * precision * recall / (precision + recall)
+
+# combine into table
+metrics <- data.frame(
+  Class = rownames(cm),
+  Precision = precision,
+  Recall = recall,
+  F1 = f1
+)
+
+metrics
+```
+```{r}
+mean(metrics$F1)
+```
+```{r}
+macro_precision <- mean(precision, na.rm = TRUE)
+macro_recall    <- mean(recall, na.rm = TRUE)
+macro_f1        <- mean(f1, na.rm = TRUE)
+
+macro_precision
+macro_recall
+macro_f1
+```
+
